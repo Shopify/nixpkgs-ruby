@@ -1,8 +1,10 @@
-{ version
-, versionSource
-, stdenv
-, fetchurl
-, fetchpatch
+{
+  version,
+  versionSource,
+  stdenv,
+  fetchurl,
+  fetchpatch,
+  ...
 }:
 stdenv.mkDerivation {
   pname = "rubygems";

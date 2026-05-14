@@ -12,10 +12,11 @@
   };
 
   outputs =
-    { self
-    , nixpkgs
-    , flake-utils
-    , ...
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      ...
     }:
     {
       templates.default = {
@@ -33,175 +34,280 @@
       overlays = import ./overlays.nix;
 
       lib = import ./lib.nix { lib = nixpkgs.lib; } // {
-        packageFromRubyVersionFile = { file, system }:
+        packageFromRubyVersionFile =
+          { file, system }:
           let
             inherit (self.lib.readRubyVersionFile file) rubyEngine version;
           in
           self.packages.${system}."${rubyEngine}-${version}";
       };
     }
-    // flake-utils.lib.eachDefaultSystem (system:
-    let
-      pkgs = import nixpkgs {
-        inherit system;
-        overlays = [
-          self.overlays.default
-        ];
-        config.permittedInsecurePackages = [
-          "openssl-1.1.1w"
-        ];
-      };
-      versionComparison = import ./lib/version-comparison.nix;
-    in
-    {
-      legacyPackages = pkgs;
-      packages = pkgs.nixpkgs-ruby.packages;
-
-      checks =
-        let
-          lib = nixpkgs.lib;
-          mkTest = { name, command, env ? { }, nativeBuildInputs ? [ ] }:
-            pkgs.runCommand name ({ inherit nativeBuildInputs; } // env) command;
-          rubyPackages = pkgs.nixpkgs-ruby.ruby;
-          rubyTestAttrs = lib.concatMapAttrs
-            (rubyName: ruby:
-              let
-                rubyVersion = nixpkgs.lib.removePrefix "ruby-" rubyName;
-              in
-              {
-                "${rubyName}-puts-ok" = {
-                  nativeBuildInputs = [
-                    ruby
-                  ];
-                  command = ''
-                    ruby -e 'puts "ok"' > $out
-                  '';
-                };
-                "${rubyName}-jemalloc" = {
-                  nativeBuildInputs = [
-                    (ruby.override { jemallocSupport = true; })
-                  ];
-                  command = ''
-                    ruby -e 'puts "ok"' > $out
-                  '';
-                };
-                "${rubyName}-mkRuby" = {
-                  nativeBuildInputs = [
-                    (self.lib.mkRuby {
-                      inherit pkgs rubyVersion;
-                    })
-                  ];
-                  command = ''
-                    ruby -e 'puts "ok"' > $out
-                  '';
-                };
-              } // (lib.optionalAttrs (with versionComparison rubyVersion; greaterOrEqualTo "2.4") {
-                # Ruby <2.4 only supports openssl 1.0 and not openssl1.1. openssl 1.0 is not supported by nixpkgs
-                # anymore, so we will not support it here.
-                "${rubyName}-openssl" = {
-                  nativeBuildInputs = [
-                    ruby
-                  ];
-                  command = ''
-                    ruby -e 'require "openssl"; puts OpenSSL::OPENSSL_VERSION' > $out
-                  '';
-                };
-              }) // (lib.optionalAttrs (with versionComparison rubyVersion; greaterOrEqualTo "2.2") {
-                "${rubyName}-bundlerEnv" =
-                  let
-                    gems = pkgs.bundlerEnv {
-                      name = "gemset";
-                      inherit ruby;
-                      gemfile = ./tests/bundlerEnv/Gemfile;
-                      lockfile = ./tests/bundlerEnv/Gemfile.lock;
-                      gemset = ./tests/bundlerEnv/gemset.nix;
-                      groups = [ "default" "production" "development" "test" ];
-                    };
-                  in
-                  {
-                    nativeBuildInputs = [
-                      self.packages.${pkgs.system}.${rubyName}
-                      gems
-                    ];
-                    command = ''
-                      ruby -e 'require "foobar"; say' > $out
-                    '';
-                  };
-              })
-            )
-            rubyPackages;
-
-          testAttrs = rubyTestAttrs // {
-            packageFromRubyVersionFileWithoutEngine =
-              let
-                ruby = self.lib.packageFromRubyVersionFile {
-                  file = ./tests/ruby-version-without-engine;
-                  inherit system;
-                };
-              in
-              {
-                nativeBuildInputs = [
-                  ruby
-                ];
-                command = ''
-                  ruby -e 'puts RUBY_VERSION' > $out
-                '';
-              };
-            packageFromRubyVersionFileWithEngine =
-              let
-                ruby = self.lib.packageFromRubyVersionFile {
-                  file = ./tests/ruby-version-with-engine;
-                  inherit system;
-                };
-              in
-              {
-                nativeBuildInputs = [
-                  ruby
-                ];
-                command = ''
-                  ruby -e 'puts RUBY_VERSION' > $out
-                '';
-              };
-          };
-        in
-        lib.mapAttrs
-          (name: testAttrs:
-            mkTest ({
-              inherit name;
-            } // testAttrs)
-          )
-          testAttrs;
-
-      devShells = {
-        # The shell for editing this project.
-        default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs;
-            [
-              nixpkgs-fmt
-            ];
+    // flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        lib = nixpkgs.lib;
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [
+            self.overlays.default
+          ];
+          config.permittedInsecurePackages = [
+            "openssl-1.1.1w"
+          ];
         };
-      };
-
-      apps.update = {
-        type = "app";
-        program =
+        versionComparison = import ./lib/version-comparison.nix;
+        intactPackages = pkgs.nixpkgs-ruby.intactPackages;
+        rubyPackages = lib.filterAttrs (
+          name: package: (builtins.match "ruby-[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+" name) != null
+        ) intactPackages;
+        mkTest =
+          {
+            name,
+            command,
+            env ? { },
+            nativeBuildInputs ? [ ],
+          }:
+          pkgs.runCommand name ({ inherit nativeBuildInputs; } // env) command;
+        flattenCheckName =
+          groupName: testName: if groupName == "common" then testName else "${groupName}-${testName}";
+        checkBatchAttrs =
+          lib.mapAttrs (
+            rubyName: ruby:
+            let
+              rubyVersion = lib.removePrefix "ruby-" rubyName;
+            in
+            {
+              puts-ok = {
+                nativeBuildInputs = [
+                  ruby
+                ];
+                command = ''
+                  ruby -e 'puts "ok"' > $out
+                '';
+              };
+              jemalloc = {
+                nativeBuildInputs = [
+                  (ruby.override { jemallocSupport = true; })
+                ];
+                command = ''
+                  ruby -e 'puts "ok"' > $out
+                '';
+              };
+              mkRuby = {
+                nativeBuildInputs = [
+                  (self.lib.mkRuby {
+                    inherit pkgs rubyVersion;
+                  })
+                ];
+                command = ''
+                  ruby -e 'puts "ok"' > $out
+                '';
+              };
+            }
+            // (lib.optionalAttrs (with versionComparison rubyVersion; greaterOrEqualTo "2.4") {
+              # Ruby <2.4 only supports openssl 1.0 and not openssl1.1. openssl 1.0 is not supported by nixpkgs
+              # anymore, so we will not support it here.
+              openssl = {
+                nativeBuildInputs = [
+                  ruby
+                ];
+                command = ''
+                  ruby -e 'require "openssl"; puts OpenSSL::OPENSSL_VERSION' > $out
+                '';
+              };
+            })
+            // (lib.optionalAttrs (with versionComparison rubyVersion; greaterOrEqualTo "3.4") {
+              docSupport = {
+                nativeBuildInputs = [
+                  (ruby.override { docSupport = true; })
+                ];
+                command = ''
+                  HOME=$TMPDIR ri Array > $out
+                '';
+              };
+            })
+            // (lib.optionalAttrs (with versionComparison rubyVersion; lessThan "3.4") {
+              docSupport-noParallel = {
+                nativeBuildInputs = [
+                  (ruby.override {
+                    docSupport = true;
+                    parallelBuild = false;
+                  })
+                ];
+                command = ''
+                  HOME=$TMPDIR ri Array > $out
+                '';
+              };
+            })
+            // (lib.optionalAttrs (with versionComparison rubyVersion; greaterOrEqualTo "2.2") {
+              bundlerEnv =
+                let
+                  gems = pkgs.bundlerEnv {
+                    name = "gemset";
+                    inherit ruby;
+                    gemfile = ./tests/bundlerEnv/Gemfile;
+                    lockfile = ./tests/bundlerEnv/Gemfile.lock;
+                    gemset = ./tests/bundlerEnv/gemset.nix;
+                    groups = [
+                      "default"
+                      "production"
+                      "development"
+                      "test"
+                    ];
+                  };
+                in
+                {
+                  nativeBuildInputs = [
+                    self.packages.${pkgs.system}.${rubyName}
+                    gems
+                  ];
+                  command = ''
+                    ruby -e 'require "foobar"; say' > $out
+                  '';
+                };
+            })
+          ) rubyPackages
+          // {
+            common = {
+              packageFromRubyVersionFileWithoutEngine =
+                let
+                  ruby = self.lib.packageFromRubyVersionFile {
+                    file = ./tests/ruby-version-without-engine;
+                    inherit system;
+                  };
+                in
+                {
+                  nativeBuildInputs = [
+                    ruby
+                  ];
+                  command = ''
+                    ruby -e 'puts RUBY_VERSION' > $out
+                  '';
+                };
+              packageFromRubyVersionFileWithEngine =
+                let
+                  ruby = self.lib.packageFromRubyVersionFile {
+                    file = ./tests/ruby-version-with-engine;
+                    inherit system;
+                  };
+                in
+                {
+                  nativeBuildInputs = [
+                    ruby
+                  ];
+                  command = ''
+                    ruby -e 'puts RUBY_VERSION' > $out
+                  '';
+                };
+            };
+          };
+        mkCheckBatch =
+          groupName: batchAttrs:
           let
-            inherit (builtins) map attrNames getFlake concatStringsSep filter;
-            inherit (nixpkgs.lib) mapAttrsToList filterAttrs;
-            pkgsetsToUpdate = filterAttrs (name: pkgset: pkgset ? updater) { rubygems = import ./rubygems; ruby = import ./ruby; };
-            updateCommand = name: pkgset:
-              ''
-                echo "Updating ${name}..."
-                (cd ${name} && ${pkgs.callPackage pkgset.updater { }}/bin/update)
-              '';
-            updateCommands = mapAttrsToList updateCommand pkgsetsToUpdate;
-            script = pkgs.writeScript "update" ''
-              #!${pkgs.bash}/bin/bash
-              set -o errexit
-              ${concatStringsSep "\n" updateCommands}
-            '';
+            batchChecks = lib.mapAttrs (
+              testName: attrs:
+              mkTest (
+                {
+                  name = flattenCheckName groupName testName;
+                }
+                // attrs
+              )
+            ) batchAttrs;
           in
-          "${script}";
-      };
-    });
+          batchChecks
+          // {
+            all = pkgs.linkFarm "${groupName}-checks" (
+              lib.mapAttrsToList (testName: checkDrv: {
+                name = testName;
+                path = checkDrv;
+              }) batchChecks
+            );
+          };
+        checkBatches = lib.mapAttrs mkCheckBatch checkBatchAttrs;
+        checks = lib.concatMapAttrs (
+          groupName: batchChecks:
+          lib.mapAttrs' (testName: checkDrv: {
+            name = flattenCheckName groupName testName;
+            value = checkDrv;
+          }) (lib.removeAttrs batchChecks [ "all" ])
+        ) checkBatches;
+        ghaMatrixEntries =
+          (builtins.map (group: {
+            os = "ubuntu-latest";
+            system = "x86_64-linux";
+            inherit group;
+          }) (builtins.attrNames self.checkBatches.x86_64-linux))
+          ++ (builtins.map (group: {
+            os = "macos-latest";
+            system = "aarch64-darwin";
+            inherit group;
+          }) (builtins.attrNames self.checkBatches.aarch64-darwin));
+        ghaPrepareMatrix = pkgs.writeShellApplication {
+          name = "gha-prepare-matrix";
+          text = ''
+            matrix=${lib.escapeShellArg (builtins.toJSON ghaMatrixEntries)}
+
+            if [ -n "''${GITHUB_OUTPUT:-}" ]; then
+              printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+            else
+              printf 'warning: GITHUB_OUTPUT is not set; writing matrix to stdout\n' >&2
+              printf 'matrix=%s\n' "$matrix"
+            fi
+          '';
+        };
+      in
+      {
+        legacyPackages = pkgs;
+        packages = intactPackages // {
+          gha-prepare-matrix = ghaPrepareMatrix;
+        };
+
+        checkBatches = checkBatches;
+
+        checks = checks;
+
+        formatter = pkgs.nixfmt-tree;
+
+        devShells = {
+          # The shell for editing this project.
+          default = pkgs.mkShell {
+            nativeBuildInputs = with pkgs; [
+              nixfmt-tree
+            ];
+          };
+        };
+
+        apps = {
+          gha-prepare-matrix = {
+            type = "app";
+            program = "${ghaPrepareMatrix}/bin/gha-prepare-matrix";
+          };
+
+          update = {
+            type = "app";
+            program =
+              let
+                inherit (builtins) concatStringsSep;
+                inherit (nixpkgs.lib) mapAttrsToList filterAttrs;
+                _pkgsets = {
+                  rubygems = import ./rubygems;
+                  ruby = import ./ruby;
+                };
+                pkgsetsToUpdate = filterAttrs (name: pkgset: pkgset ? updater) _pkgsets;
+                updateCommand = name: pkgset: ''
+                  echo "Updating ${name}..."
+                  (cd ${name} && ${pkgs.callPackage pkgset.updater { }}/bin/update)
+                '';
+                updateCommands = mapAttrsToList updateCommand pkgsetsToUpdate;
+                script = pkgs.writeScript "update" ''
+                  #!${pkgs.bash}/bin/bash
+                  set -o errexit
+                  ${concatStringsSep "\n" updateCommands}
+                '';
+              in
+              "${script}";
+          };
+        };
+      }
+    );
 }

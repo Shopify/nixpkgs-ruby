@@ -20,7 +20,7 @@ let
         let
           pkg =
             pkgs.callPackage packageFn {
-              inherit version versionSource;
+              inherit version versionSource versionComparison;
             };
         in
         applyOverrides {
@@ -53,6 +53,5 @@ lib.makeScope newScope (self: pkgsets // {
     inherit packageFromRubyVersionFile;
   };
 
-  inherit allPackages;
-  packages = intactPackages;
+  inherit allPackages intactPackages;
 })
