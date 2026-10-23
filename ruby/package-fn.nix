@@ -1,6 +1,8 @@
 {
   version,
-  versionSource,
+  versionSource
+, versionComparison
+,
   libDir ? "${(import ./parse-version.nix version).majMin}.0",
   rubygems ? null,
   stdenv,
@@ -8,7 +10,7 @@
   lib,
   fetchurl,
   fetchpatch,
-  fetchFromSavannah,
+  fetchgit,
   fetchFromGitHub,
   zlib,
   openssl,
@@ -25,7 +27,9 @@
   buildEnv,
   bundler,
   bundix,
-  removeReferencesTo,
+  removeReferencesTo
+, parallelBuild ? true
+,
   useRailsExpress ? true,
   zlibSupport ? true,
   opensslSupport ? true,
@@ -43,7 +47,7 @@ let
   op = lib.optional;
   ops = lib.optionals;
   opString = lib.optionalString;
-  config = import ./config.nix { inherit fetchFromSavannah; };
+  config = import ./config.nix { inherit fetchgit; };
 
   # Needed during postInstall
   buildRuby =
@@ -63,10 +67,15 @@ let
     # Have `configure' avoid `/usr/bin/nroff' in non-chroot builds.
     NROFF = if docSupport then "${groff}/bin/nroff" else null;
 
+    LANG =
+      if docSupport && (with versionComparison version; hasPrefix "4.0") then
+        "C.UTF-8"
+      else
+        null;
+
     nativeBuildInputs = [
       bison
-    ]
-    ++ ops (stdenv.buildPlatform != stdenv.hostPlatform) [ buildPackages.ruby ];
+    ] ++ ops (stdenv.buildPlatform != stdenv.hostPlatform) [ buildPackages.ruby ];
     buildInputs =
       (op fiddleSupport libffi)
       ++ (ops cursesSupport [
@@ -90,7 +99,7 @@ let
       ]);
     propagatedBuildInputs = (op jemallocSupport jemalloc);
 
-    enableParallelBuilding = true;
+    enableParallelBuilding = parallelBuild;
 
     postPatch = ''
       ${opString (rubygems != null) ''
@@ -110,19 +119,25 @@ let
 
     preConfigure = ''
       sed -i configure -e 's/;; #(/\n;;/g'
+      ${opString docSupport ''
+        # rdoc creates XDG_DATA_DIR (defaulting to $HOME/.local/share) even if
+        # it's not going to be used.
+        export HOME=$TMPDIR
+      ''}
     '';
 
-    configureFlags = [
-      "--enable-shared"
-      "--enable-pthread"
-    ]
-    ++ op (!docSupport) "--disable-install-doc"
-    ++ op jemallocSupport "--with-jemalloc"
-    ++ ops stdenv.isDarwin [
-      # on darwin, we have /usr/include/tk.h -- so the configure script detects
-      # that tk is installed
-      "--with-out-ext=tk"
-    ];
+    configureFlags =
+      [
+        "--enable-shared"
+        "--enable-pthread"
+      ]
+      ++ op (!docSupport) "--disable-install-doc"
+      ++ op jemallocSupport "--with-jemalloc"
+      ++ ops stdenv.isDarwin [
+        # on darwin, we have /usr/include/tk.h -- so the configure script detects
+        # that tk is installed
+        "--with-out-ext=tk"
+      ];
 
     preInstall = ''
       # Ruby installs gems here itself now.
@@ -189,8 +204,7 @@ let
     passthru = {
       version = {
         inherit libDir;
-      }
-      // (import ./parse-version.nix version);
+      } // (import ./parse-version.nix version);
       rubyEngine = "ruby";
       libPath = "lib/${self.passthru.rubyEngine}/${libDir}";
       gemPath = "lib/${self.passthru.rubyEngine}/gems/${libDir}";
@@ -201,4 +215,7 @@ let
     };
   };
 in
+# There's a known race condition when building with docs enabled before Ruby 3.4.0
+# Building documents requires parallelBuild to be false in those versions
+assert docSupport -> (with versionComparison version; greaterOrEqualTo "3.4.0" || !parallelBuild);
 self
